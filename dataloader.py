@@ -2,16 +2,30 @@
 
 import pandas as pd
 
-class dataLoader:
+#Abstract class to be called by other files
+class Dataloader:
     
     #function to load data from an excel/csv
     #path is a string filepath
     def loadData(path):
+        #attempt to read
         try:
-            file = pd.read_excel(path)
+            df = pd.read_excel(path)
+            return df.to_dict()
+        #handler for failures
         except:
             print("File Read Error - Check Path")
-            exit(1)
+            exit()
 
-dl = dataLoader()
-dl.loadData("sample.xlsx")
+    #function to load a coordinates file from a CSV
+    def loadCoordsFile(path):
+        try:
+            df = pd.read_csv(path)
+            return df.to_dict()
+        #handler for failures
+        except:
+            print("File Read Error - Check Path")
+            exit()
+
+#Example of Usage
+#dict = Dataloader.loadData("sampledata.xlsx")
