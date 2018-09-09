@@ -11,6 +11,8 @@ class Dataloader:
         #attempt to read
         try:
             df = pd.read_excel(path)
+            #mark empty fields with a *
+            df.fillna(0, inplace=True)
             return df.to_dict()
         #handler for failures
         except:
@@ -28,4 +30,6 @@ class Dataloader:
             exit()
 
 #Example of Usage
-#dict = Dataloader.loadData("sampledata.xlsx")
+#dict = 
+#Dataloader.loadData("sampledata.xlsx")
+#Dataloader.loadCoordsFile("worldcities.csv")
