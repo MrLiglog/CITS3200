@@ -2,7 +2,7 @@ from unittest import TestCase
 
 import numpy as np
 
-from orangecontrib.geo.mapper import latlon2region, get_bounding_rect
+from orangecontrib.geof.mapper import latlon2region, get_bounding_rect
 
 
 class TestUtils(TestCase):

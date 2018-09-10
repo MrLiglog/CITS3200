@@ -15,7 +15,7 @@ from sklearn.neighbors import KDTree
 import shapely.speedups
 from shapely.geometry import Point, shape as Shape, Polygon
 
-from orangecontrib.geo.cc_cities import \
+from orangecontrib.geof.cc_cities import \
     CC_NAME_TO_CC_NAME, REGION_NAME_TO_REGION_NAME, US_STATE_TO_US_STATE,\
     EUROPE_CITIES, US_CITIES, WORLD_CITIES,\
     EUROPE_CITIES_LIST, US_CITIES_LIST, WORLD_CITIES_LIST
