@@ -13,8 +13,8 @@ from Orange.data import Table, Domain, StringVariable, DiscreteVariable, Continu
 from Orange.widgets import gui, widget, settings
 from Orange.widgets.utils.itemmodels import DomainModel, PyTableModel
 from Orange.widgets.widget import Input, Output
-from orangecontrib.geo.utils import find_lat_lon
-from orangecontrib.geo.mapper import latlon2region, ToLatLon
+from orangecontrib.geof.utils import find_lat_lon
+from orangecontrib.geof.mapper import latlon2region, ToLatLon
 
 
 log = logging.getLogger(__name__)

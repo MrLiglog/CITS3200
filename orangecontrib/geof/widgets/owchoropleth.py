@@ -19,8 +19,8 @@ from Orange.widgets.utils.webview import WebviewWidget
 from Orange.widgets.utils.annotated_data import create_annotated_table, ANNOTATED_DATA_SIGNAL_NAME
 from Orange.widgets.widget import Input, Output
 
-from orangecontrib.geo.utils import find_lat_lon
-from orangecontrib.geo.mapper import latlon2region, ADMIN2_COUNTRIES, get_bounding_rect
+from orangecontrib.geof.utils import find_lat_lon
+from orangecontrib.geof.mapper import latlon2region, ADMIN2_COUNTRIES, get_bounding_rect
 
 
 if QT_VERSION <= 0x050300:

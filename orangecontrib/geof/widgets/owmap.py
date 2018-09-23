@@ -21,7 +21,8 @@ from Orange.widgets.utils.colorpalette import ColorPaletteGenerator, ContinuousP
 from Orange.widgets.utils.annotated_data import create_annotated_table, ANNOTATED_DATA_SIGNAL_NAME
 from Orange.widgets.widget import Input, Output
 
-from orangecontrib.geo.utils import find_lat_lon
+from orangecontrib.geof.utils import find_lat_lon
+from orangecontrib.geof._rangeslider import RangeSlider
 
 
 if QT_VERSION <= 0x050300:
@@ -614,6 +615,7 @@ class OWMap(widget.OWWidget):
     label_attr = settings.ContextSetting('')
     shape_attr = settings.ContextSetting('')
     size_attr = settings.ContextSetting('')
+    time_attr = settings.ContextSetting('')
     opacity = settings.Setting(100)
     zoom = settings.Setting(100)
     jittering = settings.Setting(0)
@@ -655,6 +657,9 @@ class OWMap(widget.OWWidget):
         self.data = None
         self.learner = None
 
+        self.timeLowerBound = 0
+        self.timeUpperBound = 0
+
         def selectionChanged(indices):
             self.selection = self.data[indices] if self.data is not None and indices else None
             self._indices = indices
@@ -685,6 +690,8 @@ class OWMap(widget.OWWidget):
             parent=self, placeholder='(Same size)', valid_types=ContinuousVariable)
         self._label_model = DomainModel(
             parent=self, placeholder='(No labels)')
+        self._time_model = DomainModel(
+            parent=self, placeholder='(Not selected)', valid_types=ContinuousVariable)
 
         def _set_lat_long():
             self.map.set_data(self.data, self.lat_attr, self.lon_attr)
@@ -743,6 +750,7 @@ class OWMap(widget.OWWidget):
             callback=lambda: self.map.set_marker_size(self.size_attr))
         combo.setModel(self._size_model)
 
+
         def _set_opacity():
             map.set_marker_opacity(self.opacity)
 
@@ -770,6 +778,48 @@ class OWMap(widget.OWWidget):
         self._clustering_check = gui.checkBox(
             box, self, 'cluster_points', label='Cluster points',
             callback=_set_clustering)
+        
+        # CITS3200: time data filter slider
+
+        # Callback function for setting the time attribute. Checks that the
+        # attribute is in the data before enabling the timebar
+        def _setTimeAttr():
+            if self.data is not None and self.time_attr in self.data.domain:
+
+                timedata = self.data.get_column_view(self.time_attr)[0]
+                self.timeLowerBound = np.amin(timedata)
+                self.timeUpperBound = np.amax(timedata)
+
+                self.timebar.setValues(self.timeLowerBound, 50)
+
+                self.timebar.setEnabled(True)
+            else:
+                self.timebar.setEnabled(False)
+
+        # Callback function for setting 
+        def _setTimeBounds(lower, upper):
+            self.timeLowerBound = lower
+            self.timeUpperBound = upper
+            self.timebar.label.setText('%d ~ %d'  % (self.timeLowerBound, self.timeUpperBound))
+            return
+
+        # Add the vBox to the gui
+        box = gui.vBox(self.mainArea, 'Time')
+        self._combo_time = combo = gui.comboBox(
+            box, self, 'time_attr',
+            orientation=Qt.Horizontal,
+            label='Date/Time:',
+            sendSelectedValue=True,
+            callback=_setTimeAttr)
+        combo.setModel(self._time_model)
+
+        # Add the timebar
+        self.timebar = RangeSlider(tickPosition=RangeSlider.NoTicks)
+        # Enable the timebar if saved attribute is valid
+        self.timebar.label = gui.widgetLabel(box, '')
+        box.layout().addWidget(self.timebar)
+
+        self.timebar.valuesChanged.connect(_setTimeBounds)
 
         gui.rubber(self.controlArea)
         gui.auto_commit(self.controlArea, self, 'autocommit', 'Send Selection')
@@ -806,7 +856,8 @@ class OWMap(widget.OWWidget):
                       self._color_model,
                       self._shape_model,
                       self._size_model,
-                      self._label_model):
+                      self._label_model,
+                      self._time_model):
             model.set_domain(domain)
 
         lat, lon = find_lat_lon(data)
@@ -828,6 +879,8 @@ class OWMap(widget.OWWidget):
             self._combo_label.setCurrentIndex(0)
         if len(self._class_model):
             self._combo_class.setCurrentIndex(0)
+        if len(self._time_model):
+            self._combo_time.setCurrentIndex(0)
 
         self.openContext(data)
 
@@ -836,6 +889,19 @@ class OWMap(widget.OWWidget):
         self.map.set_marker_label(self.label_attr, update=False)
         self.map.set_marker_shape(self.shape_attr, update=False)
         self.map.set_marker_size(self.size_attr, update=True)
+
+        # initialise time data bounds
+        if self.data is not None and self.time_attr in self.data.domain:
+
+            timedata = self.data.get_column_view(self.time_attr)[0]
+            self.timeLowerBound = np.amin(timedata)
+            self.timeUpperBound = np.amax(timedata)
+
+            self.timebar.setMinimumValue(self.timeLowerBound)
+            self.timebar.setMaximumValue(self.timeUpperBound)
+            self.timebar.setValues(self.timeLowerBound, self.timeUpperBound)
+
+            self.timebar.setEnabled(True)
 
     @Inputs.data_subset
     def set_subset(self, subset):
@@ -885,7 +951,8 @@ class OWMap(widget.OWWidget):
                       self._color_model,
                       self._shape_model,
                       self._size_model,
-                      self._label_model):
+                      self._label_model,
+                      self._time_model):
             model.set_domain(None)
         self.lat_attr = self.lon_attr = self.class_attr = self.color_attr = \
         self.label_attr = self.shape_attr = self.size_attr = None

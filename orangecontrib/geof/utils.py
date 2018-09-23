@@ -42,3 +42,16 @@ def find_lat_lon(data):
                     break
 
     return lat_attr, lon_attr
+
+def find_datetime(data):
+    """Return inferred date/time attributes as found in the data domain"""
+    assert isinstance(data, Table)
+
+    all_vars = list(chain(data.domain.variables, data.domain.metas))
+
+    time_attr = next(
+        (attr for attr in all_vars
+         if attr.is_continuous and
+         attr.name.lower().startswith(('year', 'date' 'time'))), None)
+         
+    return time_attr
