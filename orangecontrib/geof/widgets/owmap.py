@@ -89,6 +89,26 @@ class LeafletMap(WebviewWidget):
 
         self._should_fit_bounds = False
 
+        # Time data variables
+        self.timeAttr = None   # Name of the data time attribute
+        self.timeLower = None  # Lower bound on time filter
+        self.timeUpper = None  # Upper bound on time filter
+
+        self._timeData = None
+    
+    # Setter function for time attribute data
+    def setTimeAttr(self, attr):
+        self.timeAttr = attr
+        self._timeData = np.array(
+            self.data.get_column_view(self.timeAttr)[0],
+            dtype=float, order='F')
+
+    # Setter function for time bounds
+    def setTimeBounds(self, lower, upper):
+        self.timeLower = lower
+        self.timeUpper = upper
+        self.redraw_markers_overlay_image(new_image=True)
+
     def __del__(self):
         os.remove(self._overlay_image_path)
         self._image_token = np.nan
@@ -457,8 +477,24 @@ class LeafletMap(WebviewWidget):
         north, east, south, west, width, height, zoom, origin, map_pane_pos = self._drawing_args
 
         lat, lon = self._latlon_data.T
-        visible = ((lat <= north) & (lat >= south) &
+        tm = self._timeData
+        t1 = self.timeLower
+        t2 = self.timeUpper
+
+        print(lat)
+        print(tm)
+        print(t1)
+
+        if t1 is None or tm is None:
+            visible = ((lat <= north) & (lat >= south) &
                    (lon <= east) & (lon >= west)).nonzero()[0]
+        else:
+            # add time bounds to comparison
+            visible = ((lat <= north) & (lat >= south) &
+                   (lon <= east) & (lon >= west) &
+                   (tm <= t2) & (tm >= t1)).nonzero()[0]
+
+
         in_subset = (np.in1d(self.data.ids, self._subset_ids)
                      if self._subset_ids.size else
                      np.tile(True, len(lon)))
@@ -790,17 +826,28 @@ class OWMap(widget.OWWidget):
                 self.timeLowerBound = np.amin(timedata)
                 self.timeUpperBound = np.amax(timedata)
 
-                self.timebar.setValues(self.timeLowerBound, 50)
+                self.timebar.setMinimum(self.timeLowerBound)
+                self.timebar.setMaximum(self.timeUpperBound)
+                self.timebar.setValues(self.timeLowerBound, self.timeUpperBound)
 
                 self.timebar.setEnabled(True)
+                self.timebar.update()
+
+                # update map variables
+                self.map.setTimeAttr(self.time_attr)
             else:
                 self.timebar.setEnabled(False)
 
         # Callback function for setting 
         def _setTimeBounds(lower, upper):
+            # update map variables
+            if (self.timeLowerBound != lower) or (self.timeUpperBound != upper):
+                self.map.setTimeBounds(lower, upper)
+
             self.timeLowerBound = lower
             self.timeUpperBound = upper
             self.timebar.label.setText('%d ~ %d'  % (self.timeLowerBound, self.timeUpperBound))
+
             return
 
         # Add the vBox to the gui
@@ -814,8 +861,9 @@ class OWMap(widget.OWWidget):
         combo.setModel(self._time_model)
 
         # Add the timebar
-        self.timebar = RangeSlider(tickPosition=RangeSlider.NoTicks)
-        # Enable the timebar if saved attribute is valid
+        self.timebar = RangeSlider()
+        self.timebar.setEnabled(False)
+
         self.timebar.label = gui.widgetLabel(box, '')
         box.layout().addWidget(self.timebar)
 
@@ -891,17 +939,7 @@ class OWMap(widget.OWWidget):
         self.map.set_marker_size(self.size_attr, update=True)
 
         # initialise time data bounds
-        if self.data is not None and self.time_attr in self.data.domain:
-
-            timedata = self.data.get_column_view(self.time_attr)[0]
-            self.timeLowerBound = np.amin(timedata)
-            self.timeUpperBound = np.amax(timedata)
-
-            self.timebar.setMinimumValue(self.timeLowerBound)
-            self.timebar.setMaximumValue(self.timeUpperBound)
-            self.timebar.setValues(self.timeLowerBound, self.timeUpperBound)
-
-            self.timebar.setEnabled(True)
+        self._combo_time.setCurrentIndex(self._combo_time.currentIndex())
 
     @Inputs.data_subset
     def set_subset(self, subset):

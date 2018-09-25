@@ -386,7 +386,7 @@ class ViolinSlider(RangeSlider):
         """Format the int values into strings that are shown if showText is True."""
         return str(valueMin), str(valueMax)
 
-
+'''
 if __name__ == "__main__":
     from AnyQt.QtWidgets import QApplication, QDialog, QGridLayout, QLabel
     app = QApplication([])
@@ -420,3 +420,4 @@ if __name__ == "__main__":
 
     win.show()
     app.exec()
+    '''
