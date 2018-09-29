@@ -5,9 +5,9 @@ from tempfile import mkstemp
 
 import numpy as np
 
-from AnyQt.QtCore import Qt, QUrl, pyqtSignal, pyqtSlot, QTimer, QT_VERSION, QObject
+from AnyQt.QtCore import Qt, QUrl, pyqtSignal, pyqtSlot, QTimer, QT_VERSION, QObject, QDate, QDateTime
 from AnyQt.QtGui import QImage, QPainter, QPen, QBrush, QColor
-from AnyQt.QtWidgets import qApp
+from AnyQt.QtWidgets import qApp, QComboBox, QLabel
 
 
 from Orange.util import color_to_hex
@@ -98,7 +98,7 @@ class LeafletMap(WebviewWidget):
     
     # Setter function for time attribute data
     def setTimeAttr(self, attr):
-        self.timeAttr = attr
+        self.timeAttr = self.data.domain[attr]
         self._timeData = np.array(
             self.data.get_column_view(self.timeAttr)[0],
             dtype=float, order='F')
@@ -113,7 +113,7 @@ class LeafletMap(WebviewWidget):
         os.remove(self._overlay_image_path)
         self._image_token = np.nan
 
-    def set_data(self, data, lat_attr, lon_attr):
+    def set_data(self, data, lat_attr, lon_attr, update=False):
         self.data = data
         self._image_token = np.nan  # Stop drawing previous image
         self._owwidget.progressBarFinished(None)
@@ -158,7 +158,7 @@ class LeafletMap(WebviewWidget):
                 QTimer.singleShot(1, self.fit_to_bounds)
             else:
                 self._should_fit_bounds = True
-        else:
+        elif update:
             self.redraw_markers_overlay_image(new_image=True)
 
     def showEvent(self, event):
@@ -481,7 +481,6 @@ class LeafletMap(WebviewWidget):
         t1 = self.timeLower
         t2 = self.timeUpper
 
-        print(lat)
         print(tm)
         print(t1)
 
@@ -651,12 +650,14 @@ class OWMap(widget.OWWidget):
     label_attr = settings.ContextSetting('')
     shape_attr = settings.ContextSetting('')
     size_attr = settings.ContextSetting('')
-    time_attr = settings.ContextSetting('')
+    timeAttr = settings.ContextSetting('')
     opacity = settings.Setting(100)
     zoom = settings.Setting(100)
     jittering = settings.Setting(0)
     cluster_points = settings.Setting(False)
     show_legend = settings.Setting(True)
+
+    _timestamp = settings.ContextSetting('')
 
     TILE_PROVIDERS = OrderedDict((
         ('Black and white', 'OpenStreetMap.BlackAndWhite'),
@@ -726,7 +727,7 @@ class OWMap(widget.OWWidget):
             parent=self, placeholder='(Same size)', valid_types=ContinuousVariable)
         self._label_model = DomainModel(
             parent=self, placeholder='(No labels)')
-        self._time_model = DomainModel(
+        self._timeModel = DomainModel(
             parent=self, placeholder='(Not selected)', valid_types=ContinuousVariable)
 
         def _set_lat_long():
@@ -817,12 +818,30 @@ class OWMap(widget.OWWidget):
         
         # CITS3200: time data filter slider
 
+        # Converts timestamp into readable format based on selected
+        # timestamp type
+        def _timestampToStr(ts):
+            if (self._combo_timestamp.currentIndex() == 0):
+                return str(ts)
+            elif (self._combo_timestamp.currentIndex() == 1):
+                # UNIX Epoch
+                dt = QDateTime.fromMSecsSinceEpoch(ts * 1000)
+            elif (self._combo_timestamp.currentIndex() == 2):
+                # Excel timestamp (1900)
+                days, fDays = np.modf(ts) # split timestamp into days and fraction of day
+                dt= QDateTime(QDate(1900, 1, 1)).addDays(days - 2).addSecs(fDays * 86400)
+            return dt.toString('yyyy MMM d')
+
         # Callback function for setting the time attribute. Checks that the
         # attribute is in the data before enabling the timebar
         def _setTimeAttr():
-            if self.data is not None and self.time_attr in self.data.domain:
+            print('setting attr')
+            if self.data is not None and self.timeAttr in self.data.domain:
 
-                timedata = self.data.get_column_view(self.time_attr)[0]
+                # update map variables
+                self.map.setTimeAttr(self.timeAttr)
+
+                timedata = self.data.get_column_view(self.timeAttr)[0]
                 self.timeLowerBound = np.amin(timedata)
                 self.timeUpperBound = np.amax(timedata)
 
@@ -832,42 +851,56 @@ class OWMap(widget.OWWidget):
 
                 self.timebar.setEnabled(True)
                 self.timebar.update()
-
-                # update map variables
-                self.map.setTimeAttr(self.time_attr)
             else:
                 self.timebar.setEnabled(False)
 
         # Callback function for setting 
         def _setTimeBounds(lower, upper):
             # update map variables
-            if (self.timeLowerBound != lower) or (self.timeUpperBound != upper):
+            if (self.map.timeLower != lower) or (self.map.timeUpper != upper):
                 self.map.setTimeBounds(lower, upper)
 
             self.timeLowerBound = lower
             self.timeUpperBound = upper
-            self.timebar.label.setText('%d ~ %d'  % (self.timeLowerBound, self.timeUpperBound))
+            self.timebar.label.setText('%s ~ %s'  % (_timestampToStr(self.timeLowerBound), _timestampToStr(self.timeUpperBound)))
 
             return
 
+        # Callback function for setting timestamp type
+        def _setTimestamp():
+            self.timebar.label.setText('%s ~ %s'  % (_timestampToStr(self.timeLowerBound), _timestampToStr(self.timeUpperBound)))
+
         # Add the vBox to the gui
         box = gui.vBox(self.mainArea, 'Time')
+
+        # Add time attribute selection combo box
         self._combo_time = combo = gui.comboBox(
-            box, self, 'time_attr',
+            box, self, 'timeAttr',
             orientation=Qt.Horizontal,
             label='Date/Time:',
             sendSelectedValue=True,
             callback=_setTimeAttr)
-        combo.setModel(self._time_model)
+        combo.setModel(self._timeModel)
+        combo.activated.connect(_setTimeAttr)
+
+        # Add timestamp format selection combo box
+        timestampOptions = ["Do not parse", "UNIX Epoch", "Excel Timestamp"]
+        self._combo_timestamp = combo = gui.comboBox(
+            box, self, '_timestamp',
+            orientation=Qt.Horizontal,
+            label='Timestamp type:',
+            sendSelectedValue = True,
+            callback = _setTimestamp,
+            items = timestampOptions 
+        )
 
         # Add the timebar
         self.timebar = RangeSlider()
         self.timebar.setEnabled(False)
+        self.timebar.valuesChanged.connect(_setTimeBounds)
 
         self.timebar.label = gui.widgetLabel(box, '')
         box.layout().addWidget(self.timebar)
-
-        self.timebar.valuesChanged.connect(_setTimeBounds)
 
         gui.rubber(self.controlArea)
         gui.auto_commit(self.controlArea, self, 'autocommit', 'Send Selection')
@@ -905,7 +938,7 @@ class OWMap(widget.OWWidget):
                       self._shape_model,
                       self._size_model,
                       self._label_model,
-                      self._time_model):
+                      self._timeModel):
             model.set_domain(domain)
 
         lat, lon = find_lat_lon(data)
@@ -927,19 +960,21 @@ class OWMap(widget.OWWidget):
             self._combo_label.setCurrentIndex(0)
         if len(self._class_model):
             self._combo_class.setCurrentIndex(0)
-        if len(self._time_model):
+        if len(self._timeModel):
             self._combo_time.setCurrentIndex(0)
 
         self.openContext(data)
 
-        self.map.set_data(self.data, self.lat_attr, self.lon_attr)
+
+
+        self.map.set_data(self.data, self.lat_attr, self.lon_attr, update=False)
+        # initialise time data bounds
+        self._combo_time.activated.emit(self._combo_time.currentIndex())
         self.map.set_marker_color(self.color_attr, update=False)
         self.map.set_marker_label(self.label_attr, update=False)
         self.map.set_marker_shape(self.shape_attr, update=False)
         self.map.set_marker_size(self.size_attr, update=True)
 
-        # initialise time data bounds
-        self._combo_time.setCurrentIndex(self._combo_time.currentIndex())
 
     @Inputs.data_subset
     def set_subset(self, subset):
@@ -990,7 +1025,7 @@ class OWMap(widget.OWWidget):
                       self._shape_model,
                       self._size_model,
                       self._label_model,
-                      self._time_model):
+                      self._timeModel):
             model.set_domain(None)
         self.lat_attr = self.lon_attr = self.class_attr = self.color_attr = \
         self.label_attr = self.shape_attr = self.size_attr = None
