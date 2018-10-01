@@ -7,7 +7,7 @@ import numpy as np
 
 from AnyQt.QtCore import Qt, QUrl, pyqtSignal, pyqtSlot, QTimer, QT_VERSION, QObject, QDate, QDateTime
 from AnyQt.QtGui import QImage, QPainter, QPen, QBrush, QColor
-from AnyQt.QtWidgets import qApp, QComboBox, QLabel
+from AnyQt.QtWidgets import qApp, QComboBox, QLabel, QHBoxLayout, QFrame
 
 
 from Orange.util import color_to_hex
@@ -19,7 +19,7 @@ from Orange.widgets.utils.itemmodels import DomainModel
 from Orange.widgets.utils.webview import WebviewWidget
 from Orange.widgets.utils.colorpalette import ColorPaletteGenerator, ContinuousPaletteGenerator
 from Orange.widgets.utils.annotated_data import create_annotated_table, ANNOTATED_DATA_SIGNAL_NAME
-from Orange.widgets.widget import Input, Output
+from Orange.widgets.widget import Input, Output, OWWidget
 
 from orangecontrib.geof.utils import find_lat_lon
 from orangecontrib.geof._rangeslider import RangeSlider
@@ -189,7 +189,17 @@ class LeafletMap(WebviewWidget):
         if self.data is not None and (north != south and east != west):
             lat, lon = self._latlon_data.T
             indices = ((lat <= north) & (lat >= south) &
-                       (lon <= east) & (lon >= west))
+                        (lon <= east) & (lon >= west))
+            # add time bounds to comparison
+            tm = self._timeData
+            t1 = self.timeLower
+            t2 = self.timeUpper
+
+            if tm is not None and t1 is not None:
+                indices = ((indices) &
+                            (tm <= t2) & (tm >= t1))
+
+
             if self._selected_indices is not None:
                 indices |= self._selected_indices
             self._selected_indices = indices
@@ -618,7 +628,7 @@ class LeafletMap(WebviewWidget):
         '''.format('show' if visible else 'hide'))
 
 
-class OWMap(widget.OWWidget):
+class OWMap(OWWidget):
     name = 'Geo Map'
     description = 'Show data points on a world map.'
     icon = "icons/GeoMap.svg"
@@ -870,6 +880,13 @@ class OWMap(widget.OWWidget):
         def _setTimestamp():
             self.timebar.label.setText('%s ~ %s'  % (_timestampToStr(self.timeLowerBound), _timestampToStr(self.timeUpperBound)))
 
+        # Callback function for toggling control area
+        def _toggleControlArea():
+            if self.controlAreaVisible:
+                self.controlSplitter.label.setText('<')
+            else:
+                self.controlSplitter.label.setText('>')
+
         # Add the vBox to the gui
         box = gui.vBox(self.mainArea, 'Time')
 
@@ -911,6 +928,24 @@ class OWMap(widget.OWWidget):
         QTimer.singleShot(0, _set_zoom)
         QTimer.singleShot(0, _set_jittering)
         QTimer.singleShot(0, _set_clustering)
+
+        self.controlSplitter = self._OWWidget__splitter
+        self.controlSplitter.label = QLabel('<')
+
+        layout = QHBoxLayout()
+        layout.setContentsMargins(4, 0, 4, 0)
+        layout.addStretch(1)
+
+        line = QFrame()
+        line.setFrameShape(QFrame.VLine)
+        line.setFrameShadow(QFrame.Sunken)
+        layout.addWidget(line)
+        layout.addWidget(self.controlSplitter.label)
+
+        self.controlSplitter.setHandleWidth(25)
+        self.controlSplitter.handle(1).setLayout(layout)
+        self.controlSplitter.handleClicked.connect(_toggleControlArea)
+
 
     autocommit = settings.Setting(True)
 

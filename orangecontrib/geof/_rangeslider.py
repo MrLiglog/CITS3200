@@ -5,7 +5,7 @@ from scipy.stats import gaussian_kde
 # from PyQt5.QtGui import *
 # from PyQt5.QtWidgets import *
 from AnyQt.QtWidgets import QSlider, QStyle, QStylePainter, QStyleOptionSlider
-from AnyQt.QtGui import QPixmap, QPen, QPainter, QTransform, QBrush, QFont
+from AnyQt.QtGui import QPixmap, QPen, QPainter, QTransform, QBrush, QFont, QPalette, QColor
 from AnyQt.QtCore import QT_VERSION_STR, Qt, pyqtSignal, QRect, QSize
 
 
@@ -61,20 +61,20 @@ class RangeSlider(QSlider):
         # Draw the highlighted part on top
         # Qt4.8 and Qt5.3 draw the highlighted groove in a weird way because they
         # transpose opt.rect. Qt5.7 works fine.
-        if QT_VERSION_STR >= '5.7.0':
-            opt.subControls = QStyle.SC_SliderGroove
-            opt.sliderPosition = opt.maximum
-            if self.orientation() == Qt.Horizontal:
-                _w = opt.rect.width() / opt.maximum
-                x = round(_w * minpos)
-                w = round(_w * (maxpos - minpos))
-                opt.rect = QRect(x, 0, w, opt.rect.height())
-            else:
-                _h = opt.rect.height() / opt.maximum
-                y = round(_h * minpos)
-                h = round(_h * (maxpos - minpos))
-                opt.rect = QRect(0, y, opt.rect.width(), h)
-            painter.drawComplexControl(QStyle.CC_Slider, opt)
+        opt.subControls = QStyle.SC_SliderGroove
+        opt.sliderPosition = opt.maximum
+        opt.palette = QPalette(QColor(255, 0, 0, 128))
+        if self.orientation() == Qt.Horizontal:
+            _w = opt.rect.width() / opt.maximum
+            x = round(_w * minpos)
+            w = round(_w * (maxpos - minpos))
+            opt.rect = QRect(x, 0, w, opt.rect.height())
+        else:
+            _h = opt.rect.height() / opt.maximum
+            y = round(_h * minpos)
+            h = round(_h * (maxpos - minpos))
+            opt.rect = QRect(0, y, opt.rect.width(), h)
+        painter.drawComplexControl(QStyle.CC_Slider, opt)
 
         # Draw the handles
         for i, position in enumerate((minpos, maxpos)):
@@ -386,7 +386,7 @@ class ViolinSlider(RangeSlider):
         """Format the int values into strings that are shown if showText is True."""
         return str(valueMin), str(valueMax)
 
-'''
+
 if __name__ == "__main__":
     from AnyQt.QtWidgets import QApplication, QDialog, QGridLayout, QLabel
     app = QApplication([])
@@ -420,4 +420,4 @@ if __name__ == "__main__":
 
     win.show()
     app.exec()
-    '''
+
