@@ -21,6 +21,12 @@ from Orange.widgets.utils.colorpalette import ColorPaletteGenerator, ContinuousP
 from Orange.widgets.utils.annotated_data import create_annotated_table, ANNOTATED_DATA_SIGNAL_NAME
 from Orange.widgets.widget import Input, Output, OWWidget
 
+# Edited by Thomas
+from Orange.widgets.data import owtable
+from AnyQt.QtWidgets import QDockWidget
+from Orange.widgets.utils.itemmodels import TableModel
+# End Thomas
+
 from orangecontrib.geof.utils import find_lat_lon
 from orangecontrib.geof._rangeslider import RangeSlider
 
@@ -825,6 +831,41 @@ class OWMap(OWWidget):
         self._clustering_check = gui.checkBox(
             box, self, 'cluster_points', label='Cluster points',
             callback=_set_clustering)
+        
+        # CITS3200: Popup a table of selected data
+        
+        # - Thomas
+        def _export_to_table():
+            if self.selection is not None:
+
+                flags = Qt.WindowFlags()
+                box = gui.table(self.mainArea)
+
+                dock = QDockWidget("Table", box, flags)
+
+                # Create table out of selected data
+                table = owtable.OWDataTable()
+                table.set_dataset(self.selection)
+                dock.setWidget(table)
+
+                # Pops window out of box
+                dock.setFloating(True)
+
+                # Hides the box (how to destroy the box?)
+                box.hide()
+        
+
+        # Create seperate UI region
+        box = gui.vBox(self.controlArea, 'Tabulate Data')
+   
+        # Create button inside new region
+        gui.button(
+            box, 
+            self, 
+            label='View Selected Data in Table', 
+            callback=_export_to_table
+        )
+        # - End Thomas
         
         # CITS3200: time data filter slider
 
