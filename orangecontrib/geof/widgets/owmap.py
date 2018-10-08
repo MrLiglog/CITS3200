@@ -6,7 +6,7 @@ from tempfile import mkstemp
 import numpy as np
 
 from AnyQt.QtCore import Qt, QUrl, pyqtSignal, pyqtSlot, QTimer, QT_VERSION, QObject, QDate, QDateTime
-from AnyQt.QtGui import QImage, QPainter, QPen, QBrush, QColor
+from AnyQt.QtGui import QImage, QPainter, QPen, QBrush, QColor, QMainWindow, QMenuBar, QMenu
 from AnyQt.QtWidgets import qApp, QComboBox, QLabel, QHBoxLayout, QFrame
 
 
@@ -113,7 +113,7 @@ class LeafletMap(WebviewWidget):
     def setTimeBounds(self, lower, upper):
         self.timeLower = lower
         self.timeUpper = upper
-        self.redraw_markers_overlay_image(new_image=True)
+        self.redraw_markers_overlay_image()
 
     def __del__(self):
         os.remove(self._overlay_image_path)
@@ -497,9 +497,6 @@ class LeafletMap(WebviewWidget):
         t1 = self.timeLower
         t2 = self.timeUpper
 
-        print(tm)
-        print(t1)
-
         if t1 is None or tm is None:
             visible = ((lat <= north) & (lat >= south) &
                    (lon <= east) & (lon >= west)).nonzero()[0]
@@ -702,6 +699,24 @@ class OWMap(OWWidget):
 
     graph_name = "map"
 
+
+    # IF SEPERATE WINDOW: override showEvent of QDialog to show mainWindow and hide this widget(QDialog)
+    def showEvent(self, event):
+        #self.mainWindow.show()
+        OWWidget.showEvent(self, event)
+        # TODO save and store dock widget state
+        #OWWidget.hide()
+        # QDialog doesnt want to die. Some implementation detail in OWWidget (maybe
+        # overridden closeEvent) might be preventing it from closing'''
+
+    def closeEvent(self, event):
+        #self.mainWindow.close()
+        self._dockControlArea.close()
+        self._dockTimeSlice.close()
+        # TODO save and store dock widget state
+        OWWidget.closeEvent(self, event)
+        
+
     def __init__(self):
         super().__init__()
         self.map = map = LeafletMap(self)  # type: LeafletMap
@@ -886,7 +901,6 @@ class OWMap(OWWidget):
         # Callback function for setting the time attribute. Checks that the
         # attribute is in the data before enabling the timebar
         def _setTimeAttr():
-            print('setting attr')
             if self.data is not None and self.timeAttr in self.data.domain:
 
                 # update map variables
@@ -928,8 +942,8 @@ class OWMap(OWWidget):
             else:
                 self.controlSplitter.label.setText('>')
 
-        # Add the vBox to the gui
-        box = gui.vBox(self.mainArea, 'Time')
+        # Add the layout for time controls
+        self.timeSlice = box = gui.vBox(None, 'Time')
 
         # Add time attribute selection combo box
         self._combo_time = combo = gui.comboBox(
@@ -986,6 +1000,52 @@ class OWMap(OWWidget):
         self.controlSplitter.setHandleWidth(25)
         self.controlSplitter.handle(1).setLayout(layout)
         self.controlSplitter.handleClicked.connect(_toggleControlArea)
+
+        def _showControlArea():
+            self._dockControlArea.show()
+
+        def _showTimeSlice():
+            self._dockTimeSlice.show()
+
+        # QDockWidget can only be used with QMainWindow
+        # We have 2 options: create a QMainWindow in the QDialog (OWWidget
+        # uses QDialog) or open a seperate QMainWindow and hide/close the
+        # QDialog 
+
+        # Currently, we are trying to create a QMainWindow inside QDialog
+        # Problems with this approach: ugly margin between window title and menubar
+        # Problems with other approach: cant hide/close residual QDialog for some reason
+        
+        self.mainWindow = QMainWindow()
+        self.layout().addWidget(self.mainWindow)
+        self.layout().setContentsMargins(0,0,0,0)
+
+        #self.controlSplitter.setParent(self.mainWindow)
+        self.mainWindow.setCentralWidget(self.mainArea)
+        self.mainWindow.setCorner(Qt.BottomLeftCorner, Qt.LeftDockWidgetArea)
+        
+        # add the control area dock
+        self._dockControlArea = dock = QDockWidget('Control Area', self.mainWindow)
+        dock.setAllowedAreas(Qt.LeftDockWidgetArea | Qt.RightDockWidgetArea)
+        dock.setWidget(self.controlArea)
+        self.mainWindow.addDockWidget(Qt.LeftDockWidgetArea, dock)
+
+        # add the time slice area dock
+        self._dockTimeSlice = dock = QDockWidget('Time Slice', self.mainWindow)
+        dock.setAllowedAreas(Qt.TopDockWidgetArea | Qt.BottomDockWidgetArea)
+        dock.setWidget(self.timeSlice)
+        self.mainWindow.addDockWidget(Qt.BottomDockWidgetArea, dock)
+
+        menubar = self.mainWindow.menuBar()
+
+        menuShowDocks = menubar.addMenu('Show')
+        menuShowDocks.addAction('Control area').triggered.connect(_showControlArea)
+        menuShowDocks.addAction('Time Slice').triggered.connect(_showTimeSlice)
+
+        menubar.addMenu(menuShowDocks)
+
+
+
 
 
     autocommit = settings.Setting(True)
