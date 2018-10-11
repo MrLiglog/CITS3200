@@ -28,7 +28,7 @@ from Orange.widgets.utils.itemmodels import TableModel
 # End Thomas
 
 from orangecontrib.geof.utils import find_lat_lon
-from orangecontrib.geof._rangeslider import RangeSlider
+from orangecontrib.geof.HRangeSlider import HRangeSlider
 
 
 if QT_VERSION <= 0x050300:
@@ -703,6 +703,12 @@ class OWMap(OWWidget):
     # IF SEPERATE WINDOW: override showEvent of QDialog to show mainWindow and hide this widget(QDialog)
     def showEvent(self, event):
         #self.mainWindow.show()
+        #self._dockControlArea.show()
+        #self._dockTimeSlice.show()
+        if self.__windowState[0]:
+            self._dockControlArea.show()
+        if self.__windowState[1]:
+            self._dockTimeSlice.show()
         OWWidget.showEvent(self, event)
         # TODO save and store dock widget state
         #OWWidget.hide()
@@ -711,6 +717,7 @@ class OWMap(OWWidget):
 
     def closeEvent(self, event):
         #self.mainWindow.close()
+        self.__windowState = (self._dockControlArea.isVisible(), self._dockTimeSlice.isVisible())
         self._dockControlArea.close()
         self._dockTimeSlice.close()
         # TODO save and store dock widget state
@@ -893,9 +900,13 @@ class OWMap(OWWidget):
                 # UNIX Epoch
                 dt = QDateTime.fromMSecsSinceEpoch(ts * 1000)
             elif (self._combo_timestamp.currentIndex() == 2):
-                # Excel timestamp (1900)
+                # Excel timestamp (1900, Windows)
                 days, fDays = np.modf(ts) # split timestamp into days and fraction of day
                 dt= QDateTime(QDate(1900, 1, 1)).addDays(days - 2).addSecs(fDays * 86400)
+            elif (self._combo_timestamp.currentIndex() == 3):
+                # Excel timestamp (1904, MacOS)
+                days, fDays = np.modf(ts) # split timestamp into days and fraction of day
+                dt= QDateTime(QDate(1904, 1, 1)).addDays(days - 2).addSecs(fDays * 86400)
             return dt.toString('yyyy MMM d')
 
         # Callback function for setting the time attribute. Checks that the
@@ -910,25 +921,35 @@ class OWMap(OWWidget):
                 self.timeLowerBound = np.amin(timedata)
                 self.timeUpperBound = np.amax(timedata)
 
-                self.timebar.setMinimum(self.timeLowerBound)
                 self.timebar.setMaximum(self.timeUpperBound)
-                self.timebar.setValues(self.timeLowerBound, self.timeUpperBound)
+                self.timebar.setMinimum(self.timeLowerBound)
+
+                self.timebar.setValue(self.timeLowerBound, self.timeUpperBound)
 
                 self.timebar.setEnabled(True)
-                self.timebar.update()
+                self.timebar.setTickList(timedata)
             else:
                 self.timebar.setEnabled(False)
+
+        # prevent redraw too often
+        self._redrawPending = False
+        self._redrawTimer = timer = QTimer(self)
+        def _doRedraw():
+            if self._redrawPending:
+                self.map.setTimeBounds(self.timeLowerBound, self.timeUpperBound)
+                self._redrawPending = False
+        timer.timeout.connect(_doRedraw)
+        timer.start(40) #25 fps
+        
 
         # Callback function for setting 
         def _setTimeBounds(lower, upper):
             # update map variables
-            if (self.map.timeLower != lower) or (self.map.timeUpper != upper):
-                self.map.setTimeBounds(lower, upper)
-
             self.timeLowerBound = lower
             self.timeUpperBound = upper
-            self.timebar.label.setText('%s ~ %s'  % (_timestampToStr(self.timeLowerBound), _timestampToStr(self.timeUpperBound)))
 
+            self._redrawPending = True
+            self.timebar.label.setText('%s ~ %s'  % (_timestampToStr(self.timeLowerBound), _timestampToStr(self.timeUpperBound)))
             return
 
         # Callback function for setting timestamp type
@@ -956,7 +977,7 @@ class OWMap(OWWidget):
         combo.activated.connect(_setTimeAttr)
 
         # Add timestamp format selection combo box
-        timestampOptions = ["Do not parse", "UNIX Epoch", "Excel Timestamp"]
+        timestampOptions = ["Do not parse", "UNIX Epoch", "Excel Timestamp", "Excel Timestamp (Mac)"]
         self._combo_timestamp = combo = gui.comboBox(
             box, self, '_timestamp',
             orientation=Qt.Horizontal,
@@ -967,9 +988,9 @@ class OWMap(OWWidget):
         )
 
         # Add the timebar
-        self.timebar = RangeSlider()
+        self.timebar = HRangeSlider()
         self.timebar.setEnabled(False)
-        self.timebar.valuesChanged.connect(_setTimeBounds)
+        self.timebar.valueChanged.connect(_setTimeBounds)
 
         self.timebar.label = gui.widgetLabel(box, '')
         box.layout().addWidget(self.timebar)
@@ -1015,6 +1036,8 @@ class OWMap(OWWidget):
         # Currently, we are trying to create a QMainWindow inside QDialog
         # Problems with this approach: ugly margin between window title and menubar
         # Problems with other approach: cant hide/close residual QDialog for some reason
+
+        self.__windowState = (False, False)
         
         self.mainWindow = QMainWindow()
         self.layout().addWidget(self.mainWindow)
