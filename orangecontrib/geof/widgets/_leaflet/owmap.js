@@ -198,6 +198,13 @@ function add_markers(latlon_data) {
                 marker._firing_close_popup = 0;
                 marker.closePopup();
             }, 500);
+        },
+        mousedown: function(ev) {
+            if (ev.originalEvent.shiftKey) {
+                var marker = ev.target;
+                marker.setSelected(true);
+                pybridge.selected_marker(marker._orange_id);
+            }
         }
     };
 

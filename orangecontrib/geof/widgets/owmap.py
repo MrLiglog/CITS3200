@@ -7,7 +7,7 @@ import numpy as np
 
 from AnyQt.QtCore import Qt, QUrl, pyqtSignal, pyqtSlot, QTimer, QT_VERSION, QObject, QDate, QDateTime
 from AnyQt.QtGui import QImage, QPainter, QPen, QBrush, QColor, QMainWindow, QMenuBar, QMenu
-from AnyQt.QtWidgets import qApp, QComboBox, QLabel, QHBoxLayout, QFrame
+from AnyQt.QtWidgets import qApp, QComboBox, QLabel, QHBoxLayout, QVBoxLayout, QFrame, QLineEdit
 
 
 from Orange.util import color_to_hex
@@ -57,6 +57,10 @@ class LeafletMap(WebviewWidget):
             def redraw_markers_overlay_image(_, *args):
                 return self.redraw_markers_overlay_image(*args)
 
+            @pyqtSlot(int)
+            def selected_marker(_, *args):
+                return self.selected_marker(*args)
+
         super().__init__(parent,
                          bridge=Bridge(),
                          url=QUrl(self.toFileURL(
@@ -103,11 +107,8 @@ class LeafletMap(WebviewWidget):
         self._timeData = None
     
     # Setter function for time attribute data
-    def setTimeAttr(self, attr):
-        self.timeAttr = self.data.domain[attr]
-        self._timeData = np.array(
-            self.data.get_column_view(self.timeAttr)[0],
-            dtype=float, order='F')
+    def setTimeData(self, timedata):
+        self._timeData = timedata
 
     # Setter function for time bounds
     def setTimeBounds(self, lower, upper):
@@ -188,6 +189,23 @@ class LeafletMap(WebviewWidget):
         # Sometimes on first data, it doesn't zoom in enough. So let do it
         # once more for good measure!
         self.evalJS(script)
+
+    def selected_marker(self, id):
+        indices = None
+        id = self._visible[id]
+        prev_selected_indices = self._selected_indices
+        if self.data is not None:
+            print(id, ' was selected!')
+            indices = np.full(self._latlon_data.T[0].size, False)
+            indices[id] = True
+            if self._selected_indices is not None:
+                indices |= self._selected_indices
+            self._selected_indices = indices
+        else:
+            self._selected_indices = None
+        if np.any(self._selected_indices != prev_selected_indices):
+            self.selectionChanged.emit(indices.nonzero()[0].tolist())
+            self.redraw_markers_overlay_image(new_image=True)
 
     def selected_area(self, north, east, south, west):
         indices = np.array([])
@@ -766,7 +784,7 @@ class OWMap(OWWidget):
         self._label_model = DomainModel(
             parent=self, placeholder='(No labels)')
         self._timeModel = DomainModel(
-            parent=self, placeholder='(Not selected)', valid_types=ContinuousVariable)
+            parent=self, placeholder='(Not selected)')
 
         def _set_lat_long():
             self.map.set_data(self.data, self.lat_attr, self.lon_attr)
@@ -894,42 +912,15 @@ class OWMap(OWWidget):
         # Converts timestamp into readable format based on selected
         # timestamp type
         def _timestampToStr(ts):
-            if (self._combo_timestamp.currentIndex() == 0):
+            if self._combo_timestamp.currentIndex() == 0:
                 return str(ts)
-            elif (self._combo_timestamp.currentIndex() == 1):
-                # UNIX Epoch
-                dt = QDateTime.fromMSecsSinceEpoch(ts * 1000)
-            elif (self._combo_timestamp.currentIndex() == 2):
-                # Excel timestamp (1900, Windows)
-                days, fDays = np.modf(ts) # split timestamp into days and fraction of day
-                dt= QDateTime(QDate(1900, 1, 1)).addDays(days - 2).addSecs(fDays * 86400)
-            elif (self._combo_timestamp.currentIndex() == 3):
-                # Excel timestamp (1904, MacOS)
-                days, fDays = np.modf(ts) # split timestamp into days and fraction of day
-                dt= QDateTime(QDate(1904, 1, 1)).addDays(days - 2).addSecs(fDays * 86400)
-            return dt.toString('yyyy MMM d')
+            elif self._timeStringFormat is None:
+                return QDateTime.fromMSecsSinceEpoch(ts * 1000).toString('yyyy MM dd, hh:mm')
+            else:
+                return QDateTime.fromMSecsSinceEpoch(ts * 1000).toString(self._timeStringFormat)
 
         # Callback function for setting the time attribute. Checks that the
         # attribute is in the data before enabling the timebar
-        def _setTimeAttr():
-            if self.data is not None and self.timeAttr in self.data.domain:
-
-                # update map variables
-                self.map.setTimeAttr(self.timeAttr)
-
-                timedata = self.data.get_column_view(self.timeAttr)[0]
-                self.timeLowerBound = np.amin(timedata)
-                self.timeUpperBound = np.amax(timedata)
-
-                self.timebar.setMaximum(self.timeUpperBound)
-                self.timebar.setMinimum(self.timeLowerBound)
-
-                self.timebar.setValue(self.timeLowerBound, self.timeUpperBound)
-
-                self.timebar.setEnabled(True)
-                self.timebar.setTickList(timedata)
-            else:
-                self.timebar.setEnabled(False)
 
         # prevent redraw too often
         self._redrawPending = False
@@ -949,43 +940,124 @@ class OWMap(OWWidget):
             self.timeUpperBound = upper
 
             self._redrawPending = True
-            self.timebar.label.setText('%s ~ %s'  % (_timestampToStr(self.timeLowerBound), _timestampToStr(self.timeUpperBound)))
+            _updateTimebarLabel()
             return
 
-        # Callback function for setting timestamp type
-        def _setTimestamp():
-            self.timebar.label.setText('%s ~ %s'  % (_timestampToStr(self.timeLowerBound), _timestampToStr(self.timeUpperBound)))
-
-        # Callback function for toggling control area
-        def _toggleControlArea():
-            if self.controlAreaVisible:
-                self.controlSplitter.label.setText('<')
-            else:
-                self.controlSplitter.label.setText('>')
-
+        
         # Add the layout for time controls
-        self.timeSlice = box = gui.vBox(None, 'Time')
+        self.timeSlice = box = gui.vBox(None)
+        box.setContentsMargins(7,7,7,7)
+        
+        def _setTimeAttr():
+            if self.data is not None and self.timeAttr in self.data.domain:
+                variable = self.data.domain[self.timeAttr]
+                if not variable.is_continuous:
+                    self._combo_timestamp.setCurrentIndex(4)
+                    self._combo_timestamp.setEnabled(False)
+                else:
+                    self._combo_timestamp.setEnabled(True)
+
+                _setTimeStringFormat()
+
+                timedata = self.data.get_column_view(self.timeAttr)[0]
+                processed = np.zeros(timedata.size)
+                # convert timedata to msecs since epoch
+                if (self._combo_timestamp.currentIndex() == 0):
+                    for i, t in enumerate(timedata):
+                        processed[i] = t
+                elif (self._combo_timestamp.currentIndex() == 1):
+                    # UNIX Epoch
+                    for i, t in enumerate(timedata):
+                        processed[i] = t
+                elif (self._combo_timestamp.currentIndex() == 2):
+                    for i, t in enumerate(timedata):
+                        # Excel timestamp (1900, Windows)
+                        days, fDays = np.modf(t) # split timestamp into days and fraction of day
+                        processed[i] = QDateTime(QDate(1900, 1, 1)).addDays(days - 2).addSecs(fDays * 86400).toMSecsSinceEpoch() / 1000
+                elif (self._combo_timestamp.currentIndex() == 3):
+                    for i, t in enumerate(timedata):
+                        # Excel timestamp (1904, MacOS)
+                        days, fDays = np.modf(t) # split timestamp into days and fraction of day
+                        processed[i] = QDateTime(QDate(1904, 1, 1)).addDays(days - 2).addSecs(fDays * 86400).toMSecsSinceEpoch() / 1000
+                elif (self._combo_timestamp.currentIndex() == 4 and self._timeStringFormat is not None):
+                    for i, t in enumerate(timedata):
+                        # Text string
+                        processed[i] = QDateTime.fromString(str(t), self._timeStringFormat).toMSecsSinceEpoch() / 1000
+                else:
+                    return
+                
+                self.timebar.setMaximum(np.nanmax(processed))
+                self.timebar.setMinimum(np.nanmin(processed))
+
+                self.timebar.setValue(self.timeLowerBound, self.timeUpperBound)
+
+                self.timebar.setEnabled(True)
+
+                # update map variables
+                self.map.setTimeData(processed)
+                self.timebar.setTickList(processed)
+            else:
+                self.timebar.setEnabled(False)
+            _updateTimebarLabel()
 
         # Add time attribute selection combo box
         self._combo_time = combo = gui.comboBox(
             box, self, 'timeAttr',
             orientation=Qt.Horizontal,
-            label='Date/Time:',
+            label='Attribute:',
             sendSelectedValue=True,
             callback=_setTimeAttr)
         combo.setModel(self._timeModel)
         combo.activated.connect(_setTimeAttr)
 
+        # Callback function for setting timestamp type
+        def _setTimestamp():
+            if self._combo_timestamp.currentIndex() == 4:
+                self._lineEdit_timeStringFormat.show()
+            else:
+                self._lineEdit_timeStringFormat.hide()
+            _setTimeAttr()
+
         # Add timestamp format selection combo box
-        timestampOptions = ["Do not parse", "UNIX Epoch", "Excel Timestamp", "Excel Timestamp (Mac)"]
+        timestampOptions = ["Raw", "UNIX Timestamp", "Excel Timestamp", "Excel Timestamp (Mac)", "Date/Time Text String"]
         self._combo_timestamp = combo = gui.comboBox(
             box, self, '_timestamp',
             orientation=Qt.Horizontal,
-            label='Timestamp type:',
+            label='Data type:',
             sendSelectedValue = True,
-            callback = _setTimestamp,
             items = timestampOptions 
         )
+        self._combo_timestamp.currentIndexChanged.connect(_setTimestamp)
+
+        self._timeStringFormat = None
+
+        # Callback function for setting time string format
+        def _setTimeStringFormat():
+            lineedit = self._lineEdit_timeStringFormat
+            newFormat = lineedit.text()
+            if QDateTime.fromString(str(self.data.get_column_view(self.timeAttr)[0][0]), newFormat).isValid():
+                lineedit.setStyleSheet('color: #000')
+                self._timeStringFormat = newFormat
+                self.timebar.setEnabled(True)
+                _updateTimebarLabel()
+            else:
+                lineedit.setStyleSheet('color: #f00')
+                self._timeStringFormat = None
+                self.timebar.setEnabled(False)
+
+        # Time string format for Text timestamp
+        self._lineEdit_timeStringFormat = lineedit = QLineEdit(box)
+        lineedit.setMaxLength(64)
+        lineedit.textChanged.connect(_setTimeStringFormat)
+        lineedit.editingFinished.connect(_setTimeAttr)
+        lineedit.setPlaceholderText('Text time string format')
+        box.layout().addWidget(lineedit)
+        box.layout().setAlignment(lineedit, Qt.AlignRight)
+        lineedit.hide()
+
+        def _updateTimebarLabel():
+            self.timebar.label.setText('%s ~ %s' % (_timestampToStr(self.timeLowerBound),\
+             _timestampToStr(self.timeUpperBound)) if self.timebar.isEnabled() else '')
 
         # Add the timebar
         self.timebar = HRangeSlider()
@@ -996,6 +1068,7 @@ class OWMap(OWWidget):
         box.layout().addWidget(self.timebar)
 
         gui.rubber(self.controlArea)
+        gui.rubber(self.timeSlice)
         gui.auto_commit(self.controlArea, self, 'autocommit', 'Send Selection')
 
         QTimer.singleShot(0, _set_map_provider)
@@ -1004,23 +1077,6 @@ class OWMap(OWWidget):
         QTimer.singleShot(0, _set_zoom)
         QTimer.singleShot(0, _set_jittering)
         QTimer.singleShot(0, _set_clustering)
-
-        self.controlSplitter = self._OWWidget__splitter
-        self.controlSplitter.label = QLabel('<')
-
-        layout = QHBoxLayout()
-        layout.setContentsMargins(4, 0, 4, 0)
-        layout.addStretch(1)
-
-        line = QFrame()
-        line.setFrameShape(QFrame.VLine)
-        line.setFrameShadow(QFrame.Sunken)
-        layout.addWidget(line)
-        layout.addWidget(self.controlSplitter.label)
-
-        self.controlSplitter.setHandleWidth(25)
-        self.controlSplitter.handle(1).setLayout(layout)
-        self.controlSplitter.handleClicked.connect(_toggleControlArea)
 
         def _showControlArea():
             self._dockControlArea.show()
@@ -1045,7 +1101,7 @@ class OWMap(OWWidget):
 
         #self.controlSplitter.setParent(self.mainWindow)
         self.mainWindow.setCentralWidget(self.mainArea)
-        self.mainWindow.setCorner(Qt.BottomLeftCorner, Qt.LeftDockWidgetArea)
+        self.mainWindow.setCorner(Qt.BottomLeftCorner, Qt.BottomDockWidgetArea)
         
         # add the control area dock
         self._dockControlArea = dock = QDockWidget('Control Area', self.mainWindow)
@@ -1054,8 +1110,8 @@ class OWMap(OWWidget):
         self.mainWindow.addDockWidget(Qt.LeftDockWidgetArea, dock)
 
         # add the time slice area dock
-        self._dockTimeSlice = dock = QDockWidget('Time Slice', self.mainWindow)
-        dock.setAllowedAreas(Qt.TopDockWidgetArea | Qt.BottomDockWidgetArea)
+        self._dockTimeSlice = dock = QDockWidget('Slice', self.mainWindow)
+        dock.setAllowedAreas(Qt.AllDockWidgetAreas)
         dock.setWidget(self.timeSlice)
         self.mainWindow.addDockWidget(Qt.BottomDockWidgetArea, dock)
 
@@ -1063,7 +1119,7 @@ class OWMap(OWWidget):
 
         menuShowDocks = menubar.addMenu('Show')
         menuShowDocks.addAction('Control area').triggered.connect(_showControlArea)
-        menuShowDocks.addAction('Time Slice').triggered.connect(_showTimeSlice)
+        menuShowDocks.addAction('Slice').triggered.connect(_showTimeSlice)
 
         menubar.addMenu(menuShowDocks)
 
