@@ -3,6 +3,8 @@
 import io
 import tkinter as tk
 from tkinter import filedialog
+from os import path
+
 import pandas as pd
 import numpy as np
 from AnyQt.QtCore import Qt
@@ -88,8 +90,8 @@ class GeoCodeFromFile(widget.OWWidget):
             data = None
             try:
                 fp = open("xlfp.txt", "r")
-                path = fp.readline()
-                df = pd.read_excel(path)
+                _path = fp.readline()
+                df = pd.read_excel(_path)
                 #mark empty fields in lat and long with a 0
                 df.fillna({'Lat':0, 'Long':0}, inplace=True)
                 data = df
@@ -97,7 +99,8 @@ class GeoCodeFromFile(widget.OWWidget):
                 print("Invalid file or Broken Path")
             #read the coordinate file
             try:
-                df = pd.read_csv("worldcities.csv")
+                csvPath = path.join(path.dirname(path.dirname(__file__)), 'worldcities.csv')
+                df = pd.read_csv(csvPath)
                 coordfile = df.to_dict()
             except:
                 print("could not find coordinate file worldcities.csv in main Orange folder")
