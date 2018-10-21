@@ -37,6 +37,10 @@ class HRangeSlider(QAbstractSlider):
     # emitted when the slider value changes. Changes with position
     # if tracking is enabled: setTracking/hasTracking()
     valueChanged = pyqtSignal(float, float)
+    # emitted when the interval changes (gap between max and min)
+    # arguments is the new interval value. Always emitted AFTER
+    # valueChanged
+    intervalChanged = pyqtSignal(float)
 
     # not supported
     setInvertedAppearance = setInvertedControls = setOrientation = pageStep = setPageStep\
@@ -101,6 +105,32 @@ class HRangeSlider(QAbstractSlider):
     def invertedControls(self):
         return false
 
+    def steps(self):
+        return self.__steps
+
+    def valueSteps(self):
+        return (int(self.__value0), int(self.__value1))
+    
+    def setValueSteps(self, value0, value1):
+        if value0 > value1:
+            return
+        steps0 = value0
+        steps1 = value1
+        self.setSliderValue(steps0, steps1)
+        if self.__position0 != self.__value0 or self.__position1 != self.__value1:
+            self.__position0 = self.__value0
+            self.__position1 = self.__value1
+            self.sliderMoved.emit(self.stepsToValue(self.__position0), self.stepsToValue(self.__position1))
+            self.update()
+
+    # sets a new step value and tries to approximate the old values
+    def setSteps(self, steps):
+        if steps <= 0:
+            return
+        oldValue = self.value()
+        self.__steps = steps
+        self.setValue(oldValue[0], oldValue[1])
+
     def maximum(self):
         return self.__scaledMaximum
 
@@ -115,13 +145,17 @@ class HRangeSlider(QAbstractSlider):
         self.__scaledMaximum = newMaximum
         self.__scaledMinimum = min(self.__scaledMinimum, self.__scaledMaximum)
         self.rangeChanged.emit(self.__scaledMinimum, self.__scaledMaximum)
-        self.valueChanged.emit(self.__stepsToValue(self.__value0), self.__stepsToValue(self.__value1))
+        val0 = self.stepsToValue(self.__value0)
+        val1 = self.stepsToValue(self.__value1)
+        self.valueChanged.emit(val0, val1)
+        self.intervalChanged.emit(val1 - val0)
         self._makeTickMarks()
         self.update()
         return True
 
     def minimum(self):
         return self.__scaledMinimum
+
 
     # sets the maximum value. The minimum value will be set to the new maximum if it is
     # greater (or equal) to the new maximum. Slider positions and values will maintain 
@@ -134,7 +168,10 @@ class HRangeSlider(QAbstractSlider):
         self.__scaledMinimum = newMinimum
         self.__scaledMaximum = max(self.__scaledMinimum, self.__scaledMaximum)
         self.rangeChanged.emit(self.__scaledMinimum, self.__scaledMaximum)
-        self.valueChanged.emit(self.__stepsToValue(self.__value0), self.__stepsToValue(self.__value1))
+        val0 = self.stepsToValue(self.__value0)
+        val1 = self.stepsToValue(self.__value1)
+        self.valueChanged.emit(val0, val1)
+        self.intervalChanged.emit(val1 - val0)
         self._makeTickMarks()
         self.update()
         return True
@@ -146,7 +183,7 @@ class HRangeSlider(QAbstractSlider):
         return self._press in {0,1,2}
 
     def value(self):
-        return (self.__stepsToValue(self.__value0), self.__stepsToValue(self.__value1))
+        return (self.stepsToValue(self.__value0), self.stepsToValue(self.__value1))
 
     # Used to (programatically) set the values AND positions on the slider
     # Slider values will be forced within the range [maximum, minimum], so
@@ -154,14 +191,15 @@ class HRangeSlider(QAbstractSlider):
     def setValue(self, value0, value1):
         if value0 > value1:
             return
-        steps0 = self.__valueToSteps(value0)
-        steps1 = self.__valueToSteps(value1)
+        steps0 = self.valueToSteps(value0)
+        steps1 = self.valueToSteps(value1)
         
         self.setSliderValue(steps0, steps1)
         if self.__position0 != self.__value0 or self.__position1 != self.__value1:
             self.__position0 = self.__value0
             self.__position1 = self.__value1
-            self.sliderMoved.emit(self.__stepsToValue(self.__position0), self.__stepsToValue(self.__position1))
+            self.sliderMoved.emit(self.stepsToValue(self.__position0), self.stepsToValue(self.__position1))
+            self.update()
 
     def setTickList(self, tickList):
         self._tickList = np.nan_to_num(np.unique(tickList))
@@ -171,10 +209,10 @@ class HRangeSlider(QAbstractSlider):
 
     # OVERRIDE QABSTRACTSLIDER FUNCTIONS
     # ...
-    def __stepsToValue(self, steps):
+    def stepsToValue(self, steps):
         return steps / self.__steps * (self.__scaledMaximum - self.__scaledMinimum) + self.__scaledMinimum
 
-    def __valueToSteps(self, value):
+    def valueToSteps(self, value):
         if self.__scaledMaximum == self.__scaledMinimum:
             return 0
         return round((value - self.__scaledMinimum) / (self.__scaledMaximum - self.__scaledMinimum) * self.__steps)
@@ -197,7 +235,7 @@ class HRangeSlider(QAbstractSlider):
         if self.hasTracking():
             self.setSliderValue(self.__position0, self.__position1)
         if oldPos0 != self.__position0 or oldPos1 != self.__position1:
-            self.sliderMoved.emit(self.__stepsToValue(self.__position0), self.__stepsToValue(self.__position1))
+            self.sliderMoved.emit(self.stepsToValue(self.__position0), self.stepsToValue(self.__position1))
         self.update()
 
     def setSliderValue(self, val0, val1):
@@ -207,8 +245,16 @@ class HRangeSlider(QAbstractSlider):
             self.__value0 = max(val0, 0)
         if val1 is not None:
             self.__value1 = min(val1, self.__steps)
+        val0 = self.stepsToValue(self.__value0)
+        val1 = self.stepsToValue(self.__value1)
         if oldVal0 != val0 or oldVal1 != val1:
-            self.valueChanged.emit(self.__stepsToValue(self.__value0), self.__stepsToValue(self.__value1))
+            self.valueChanged.emit(val0, val1)
+        if (oldVal1 - oldVal0) != (self.__value1 - self.__value0):
+            #print(oldVal1, ',', oldVal0, ',', val1, ',', val0)
+            self.intervalChanged.emit(val1 - val0)
+
+    def updateValues(self):
+        self.setSliderValue(self.__position0, self.__position1)
 
     # override
     def sizeHint(self):
@@ -294,7 +340,7 @@ class HRangeSlider(QAbstractSlider):
         for val in self._tickList:
             if val < self.__scaledMinimum or val > self.__scaledMaximum:
                 continue
-            step = self.__valueToSteps(val)
+            step = self.valueToSteps(val)
             x = step*w/v
             painter.drawLine(x, 0, x, self._tickHeight - 1)
 

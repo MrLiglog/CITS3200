@@ -25,7 +25,9 @@ from tempfile import mkstemp
 import numpy as np
 
 from AnyQt.QtCore import Qt, QUrl, pyqtSignal, pyqtSlot, QTimer, QT_VERSION, QObject, QDate, QDateTime
-from AnyQt.QtGui import QImage, QPainter, QPen, QBrush, QColor, QMainWindow, QMenuBar, QMenu
+from AnyQt.QtGui import QImage, QPainter, QPen, QBrush, QColor, \
+                        QMainWindow, QMenuBar, QMenu, QIntValidator, QDoubleValidator, \
+                        QMessageBox, QPixmap
 from AnyQt.QtWidgets import qApp, QComboBox, QLabel, QHBoxLayout, QVBoxLayout, QFrame, QLineEdit
 
 
@@ -79,6 +81,17 @@ class LeafletMap(WebviewWidget):
             @pyqtSlot(int)
             def selected_marker(_, *args):
                 return self.selected_marker(*args)
+
+            @pyqtSlot('QVariantList')
+            def calculateGrids(_, *args):
+                return self._owwidget._calculateGrids(*args)
+
+            @pyqtSlot()
+            def redrawWeather(_):
+                if self._owwidget.weatherGenerateAll:
+                    return self._owwidget.clearGrids()
+                else:
+                    return self._owwidget.generateGrids()
 
         super().__init__(parent,
                          bridge=Bridge(),
@@ -214,7 +227,6 @@ class LeafletMap(WebviewWidget):
         id = self._visible[id]
         prev_selected_indices = self._selected_indices
         if self.data is not None:
-            print(id, ' was selected!')
             indices = np.full(self._latlon_data.T[0].size, False)
             indices[id] = True
             if self._selected_indices is not None:
@@ -611,6 +623,7 @@ class LeafletMap(WebviewWidget):
                 (self._sizes[batch] if self._size_attr else np.tile(10, len(batch)))
 
             opacity_subset, opacity_rest = self._opacity, int(.8 * self._opacity)
+            self._owwidget.progressBarInit(None)
             for x, y, is_selected, size, color, _in_subset in \
                     zip(x, y, selected[batch], sizes, colors, in_subset[batch]):
 
@@ -654,7 +667,6 @@ class LeafletMap(WebviewWidget):
                 self._image_token = None
 
         self._owwidget.progressBarFinished(None)
-        self._owwidget.progressBarInit(None)
         QTimer.singleShot(10, add_points)
 
     def set_subset_ids(self, ids):
@@ -674,8 +686,10 @@ class OWMap(OWWidget):
     icon = "icons/GeoMap.svg"
     priority = 100
 
+
     class Inputs:
         data = Input("Data", Table, default=True)
+        weatherData = Input('Weather Data', Table)
         data_subset = Input("Data Subset", Table)
         learner = Input("Learner", Learner)
 
@@ -701,13 +715,19 @@ class OWMap(OWWidget):
     shape_attr = settings.ContextSetting('')
     size_attr = settings.ContextSetting('')
     timeAttr = settings.ContextSetting('')
+    weatherInterpType = settings.Setting(0)
+    weatherSearchDistance = settings.Setting(500)
+    weatherInversePower = settings.Setting(2)
+    weatherGridSize = settings.Setting(32)
     opacity = settings.Setting(100)
     zoom = settings.Setting(100)
     jittering = settings.Setting(0)
     cluster_points = settings.Setting(False)
     show_legend = settings.Setting(True)
+    autocommit = settings.Setting(True)
 
     _timestamp = settings.ContextSetting('')
+    _weatherTimestamp = settings.Setting('')
 
     TILE_PROVIDERS = OrderedDict((
         ('Black and white', 'OpenStreetMap.BlackAndWhite'),
@@ -764,6 +784,7 @@ class OWMap(OWWidget):
     def __init__(self):
         super().__init__()
         self.map = map = LeafletMap(self)  # type: LeafletMap
+        self.map._widget = self
         self.mainArea.layout().addWidget(map)
         self.selection = None
         self.data = None
@@ -771,6 +792,9 @@ class OWMap(OWWidget):
 
         self.timeLowerBound = 0
         self.timeUpperBound = 0
+
+        self.weatherData = None
+        self._weatherOverlayImagePath = mkstemp(prefix='orange-weatherOverlay-', suffix='.png')[1]
 
         def selectionChanged(indices):
             self.selection = self.data[indices] if self.data is not None and indices else None
@@ -804,6 +828,11 @@ class OWMap(OWWidget):
             parent=self, placeholder='(No labels)')
         self._timeModel = DomainModel(
             parent=self, placeholder='(Not selected)')
+        self._weatherModel = DomainModel(
+            parent=self, valid_types=ContinuousVariable)
+        self._weatherTimeModel = DomainModel(
+            parent=self, placeholder='(Not selected)')
+        
 
         def _set_lat_long():
             self.map.set_data(self.data, self.lat_attr, self.lon_attr)
@@ -925,6 +954,9 @@ class OWMap(OWWidget):
             callback=_export_to_table
         )
         # - End Thomas
+
+        gui.rubber(self.controlArea)
+        gui.auto_commit(self.controlArea, self, 'autocommit', 'Send Selection')
         
         # CITS3200: time data filter slider
 
@@ -943,13 +975,17 @@ class OWMap(OWWidget):
 
         # prevent redraw too often
         self._redrawPending = False
+        self._redrawWeatherPending = False
         self._redrawTimer = timer = QTimer(self)
         def _doRedraw():
             if self._redrawPending:
                 self.map.setTimeBounds(self.timeLowerBound, self.timeUpperBound)
                 self._redrawPending = False
+            if self._redrawWeatherPending:
+                self._doUpdateWeatherOverlay()
+                self._redrawWeatherPending = False
         timer.timeout.connect(_doRedraw)
-        timer.start(40) #25 fps
+        timer.start(40) #~25 fps
         
 
         # Callback function for setting 
@@ -958,14 +994,58 @@ class OWMap(OWWidget):
             self.timeLowerBound = lower
             self.timeUpperBound = upper
 
+            if self._lockTimebars:
+                tb = self.weatherTimebar
+                v0 = tb.valueToSteps(lower - self._timebarLockOffset)
+                v1 = v0 + self._timebarLockWeatherStepInterval
+                if v0 < 0:
+                    tb._setSliderPosition(0, self._timebarLockWeatherStepInterval)
+                elif v1 > tb.steps():
+                    tb._setSliderPosition(tb.steps() - self._timebarLockWeatherStepInterval, tb.steps())
+                else:
+                    tb._setSliderPosition(v0, v1)
+                
             self._redrawPending = True
             _updateTimebarLabel()
             return
+
+        def _timebarLockMouseReleaseLink(int):
+            if self._lockTimebars:
+                self.weatherTimebar.updateValues()
 
         
         # Add the layout for time controls
         self.timeSlice = box = gui.vBox(None)
         box.setContentsMargins(7,7,7,7)
+
+        # converts np array of timedata to UNIX timestamps based on combobox index
+        def _timestampsToUNIX(timedata, comboIndex, stringFormat=None):
+            processed = np.zeros(timedata.size)
+            if (comboIndex == 0):
+                for i, t in enumerate(timedata):
+                    processed[i] = t
+            elif (comboIndex == 1):
+                # UNIX Epoch
+                for i, t in enumerate(timedata):
+                    processed[i] = t
+            elif (comboIndex == 2):
+                for i, t in enumerate(timedata):
+                    # Excel timestamp (1900, Windows)
+                    days, fDays = np.modf(t) # split timestamp into days and fraction of day
+                    processed[i] = QDateTime(QDate(1900, 1, 1)).addDays(days - 2).addSecs(fDays * 86400).toMSecsSinceEpoch() / 1000
+            elif (comboIndex == 3):
+                for i, t in enumerate(timedata):
+                    # Excel timestamp (1904, MacOS)
+                    days, fDays = np.modf(t) # split timestamp into days and fraction of day
+                    processed[i] = QDateTime(QDate(1904, 1, 1)).addDays(days - 2).addSecs(fDays * 86400).toMSecsSinceEpoch() / 1000
+            elif (comboIndex == 4 and stringFormat is not None):
+                for i, t in enumerate(timedata):
+                    # Text string
+                    processed[i] = QDateTime.fromString(str(t), stringFormat).toMSecsSinceEpoch() / 1000
+            else:
+                return None
+
+            return processed
         
         def _setTimeAttr():
             if self.data is not None and self.timeAttr in self.data.domain:
@@ -979,44 +1059,24 @@ class OWMap(OWWidget):
                 _setTimeStringFormat()
 
                 timedata = self.data.get_column_view(self.timeAttr)[0]
-                processed = np.zeros(timedata.size)
-                # convert timedata to msecs since epoch
-                if (self._combo_timestamp.currentIndex() == 0):
-                    for i, t in enumerate(timedata):
-                        processed[i] = t
-                elif (self._combo_timestamp.currentIndex() == 1):
-                    # UNIX Epoch
-                    for i, t in enumerate(timedata):
-                        processed[i] = t
-                elif (self._combo_timestamp.currentIndex() == 2):
-                    for i, t in enumerate(timedata):
-                        # Excel timestamp (1900, Windows)
-                        days, fDays = np.modf(t) # split timestamp into days and fraction of day
-                        processed[i] = QDateTime(QDate(1900, 1, 1)).addDays(days - 2).addSecs(fDays * 86400).toMSecsSinceEpoch() / 1000
-                elif (self._combo_timestamp.currentIndex() == 3):
-                    for i, t in enumerate(timedata):
-                        # Excel timestamp (1904, MacOS)
-                        days, fDays = np.modf(t) # split timestamp into days and fraction of day
-                        processed[i] = QDateTime(QDate(1904, 1, 1)).addDays(days - 2).addSecs(fDays * 86400).toMSecsSinceEpoch() / 1000
-                elif (self._combo_timestamp.currentIndex() == 4 and self._timeStringFormat is not None):
-                    for i, t in enumerate(timedata):
-                        # Text string
-                        processed[i] = QDateTime.fromString(str(t), self._timeStringFormat).toMSecsSinceEpoch() / 1000
-                else:
+                processed = _timestampsToUNIX(timedata, self._combo_timestamp.currentIndex(), self._timeStringFormat)
+                if processed is None:
                     return
                 
                 self.timebar.setMaximum(np.nanmax(processed))
                 self.timebar.setMinimum(np.nanmin(processed))
-
                 self.timebar.setValue(self.timeLowerBound, self.timeUpperBound)
-
                 self.timebar.setEnabled(True)
+
+                if self.weatherData is not None and self.weatherTimeAttr in self.weatherData.domain:
+                    self.weatherTimebar.checkLock.show()
 
                 # update map variables
                 self.map.setTimeData(processed)
                 self.timebar.setTickList(processed)
             else:
                 self.timebar.setEnabled(False)
+                self.weatherTimebar.checkLock.hide()
             _updateTimebarLabel()
 
         # Add time attribute selection combo box
@@ -1079,16 +1139,326 @@ class OWMap(OWWidget):
              _timestampToStr(self.timeUpperBound)) if self.timebar.isEnabled() else '')
 
         # Add the timebar
-        self.timebar = HRangeSlider()
-        self.timebar.setEnabled(False)
-        self.timebar.valueChanged.connect(_setTimeBounds)
+        self.timebar = slider = HRangeSlider()
+        slider.setEnabled(False)
+        slider.valueChanged.connect(_setTimeBounds)
+        slider.sliderReleased.connect(_timebarLockMouseReleaseLink)
 
-        self.timebar.label = gui.widgetLabel(box, '')
-        box.layout().addWidget(self.timebar)
+        slider.label = gui.widgetLabel(box, '')
+        box.layout().addWidget(slider)
 
-        gui.rubber(self.controlArea)
+        def _toggleTimebarLock():
+            # re-set slider ranges
+            if self._lockTimebars:
+                self.weatherTimebar.updateValues()
+                self._timebarLockOffset = self.timebar.value()[0] - self.weatherTimebar.value()[0]
+                self._timebarLockWeatherStepInterval = self.weatherTimebar.valueSteps()[1] - self.weatherTimebar.valueSteps()[0]
+        
+        # weather timebars
+        self._lockTimebars = False
+
+        self.weatherTimebar = slider = HRangeSlider()
+        gui.separator(box)
+        slider.labelName = gui.widgetLabel(box, 'Interpolated overlay')
+        slider.labelValue = gui.widgetLabel(box, '')
+        box.layout().addWidget(slider)
+        slider.checkLock = check = gui.checkBox(
+            box, self, '_lockTimebars',
+            label='Lock to main slider',
+            callback=_toggleTimebarLock
+        )
+        slider.hide()
+        slider.setTracking(False)
+        slider.labelName.hide()
+        slider.labelValue.hide()
+        slider.checkLock.hide()
+
         gui.rubber(self.timeSlice)
-        gui.auto_commit(self.controlArea, self, 'autocommit', 'Send Selection')
+
+        ## WEATHER WIDGET
+        self.weatherTimeData = None
+
+        def _setWeatherAttr():
+            _setInterpParams()
+
+        def _setWeatherParamAttr():
+            param = self.weatherData.get_column_view(self.weatherParamAttr)[0]
+            self.weatherVisualMax = np.nanmax(param)
+            self.weatherVisualMin = np.nanmin(param)
+            _setInterpParams()
+
+        def _setWeatherTimeAttr():
+            if self.weatherData is not None and self.weatherTimeAttr in self.weatherData.domain:
+                
+                variable = self.weatherData.domain[self.weatherTimeAttr]
+                if not variable.is_continuous:
+                    self._comboWeatherTimestamp.setCurrentIndex(4)
+                    self._comboWeatherTimestamp.setEnabled(False)
+                else:
+                    self._comboWeatherTimestamp.setEnabled(True)
+
+                timedata = self.weatherData.get_column_view(self.weatherTimeAttr)[0]
+                processed = _timestampsToUNIX(timedata, self._comboWeatherTimestamp.currentIndex(), self._weatherTimestringFormat)
+                if processed is None:
+                    return
+                
+                self.weatherTimeData = processed
+
+                # for later
+                slider = self.weatherTimebar
+                slider.show()
+                slider.labelValue.show()
+                slider.labelName.show()
+
+                # try to match slider step to data granularity
+                pmin = np.nanmin(processed)
+                pmax = np.nanmax(processed)
+                pstep = np.ma.masked_equal(np.diff(np.sort(processed)), 0.0, copy=False).min()
+                psteps = (pmax - pmin) / pstep
+                slider.setSteps(min(psteps, 1e4))
+                slider.setTickList(processed)
+                slider.setMinimum(np.nanmin(processed))
+                slider.setMaximum(np.nanmax(processed))
+
+                self._lineweatherTimeInterval.setEnabled(True)
+                
+                if self.data is not None and self.timeAttr in self.data.domain:
+                    slider.checkLock.show()
+            else:
+                self.weatherTimeData = None
+
+                slider = self.weatherTimebar
+                slider.hide()
+                slider.labelValue.hide()
+                slider.labelName.hide()
+                slider.checkLock.hide()
+
+                self._lineweatherTimeInterval.setEnabled(False)
+            #update label?
+
+        def _setWeatherTimeStringFormat():
+            lineedit = self._lineWeatherTimestringFormat
+            newFormat = lineedit.text()
+            if QDateTime.fromString(str(self.weatherData.get_column_view(self.weatherTimeAttr)[0][0]), newFormat).isValid():
+                lineedit.setStyleSheet('color: #000')
+                self._weatherTimestringFormat = newFormat
+            else:
+                lineedit.setStyleSheet('color: #f00')
+                self._weatherTimestringFormat = None
+
+        def _setWeatherTimestamp():
+            if self._comboWeatherTimestamp.currentIndex() == 4:
+                self._lineWeatherTimestringFormat.show()
+            else:
+                self._lineWeatherTimestringFormat.hide()
+            _setWeatherTimeAttr()
+
+        def _weatherTimeBoundsChanged(lower, upper):
+            # think about introducing a minimum range for slider
+            # or possibly setting a minimum step size but this
+            # will do for now
+            if not self.weatherGenerateAll:
+                self.generateGrids()
+            else:
+                self._updateWeatherOverlay()
+
+        # signal emitted after valueChanged
+        def _weatherTimeIntervalChanged(newInterval):
+            self._lineweatherTimeInterval.setText(str(round(newInterval, 7)))
+            _setInterpParams()
+
+        self.weatherTimebar.valueChanged.connect(_weatherTimeBoundsChanged)
+        self.weatherTimebar.intervalChanged.connect(_weatherTimeIntervalChanged)
+        self.weatherTimebar.sliderReleased.connect(_toggleTimebarLock)
+
+        def _setweatherTimeInterval():
+            slider = self.weatherTimebar
+            slider.setValue(slider.minimum(), slider.minimum() + self.weatherTimeInterval)
+            v = slider.value()
+        
+        def _setInterpParams():
+            if self.weatherGenerateAll:
+                self.clearGrids()
+            else:
+                self.generateGrids()
+
+        def _setInterpType():
+            return
+
+        def _toggleGenerateAll():
+            # show message
+            if self.weatherGenerateAll:
+                self._buttonGenerateGrids.show()
+                self.weatherTimebar.setTracking(True)
+                self.clearGrids()
+            else:
+                self._buttonGenerateGrids.hide()
+                self.weatherTimebar.setTracking(False)
+                self.generateGrids()
+
+        self.weatherWidget = box = gui.vBox(None)
+        box.setContentsMargins(7,7,7,7)
+
+        box = gui.vBox(box, 'Attributes')
+
+        self.weatherLatAttr = ''
+        self._comboWeatherLat = combo = gui.comboBox(
+            box, self, 'weatherLatAttr',
+            orientation=Qt.Horizontal,
+            label='Latitude:',
+            sendSelectedValue=True,
+            callback=_setWeatherAttr)
+        combo.setModel(self._weatherModel)
+        
+        self.weatherLonAttr = ''
+        self._comboWeatherLon = combo = gui.comboBox(
+            box, self, 'weatherLonAttr',
+            orientation=Qt.Horizontal,
+            label='Longitude:',
+            sendSelectedValue=True,
+            callback=_setWeatherAttr)
+        combo.setModel(self._weatherModel)
+
+        self.weatherParamAttr = ''
+        self._comboWeatherParam = combo = gui.comboBox(
+            box, self, 'weatherParamAttr',
+            orientation=Qt.Horizontal,
+            label='Parameter:',
+            sendSelectedValue=True,
+            callback=_setWeatherParamAttr)
+        combo.setModel(self._weatherModel)
+
+        self.weatherTimeAttr = ''
+        self._comboWeatherTime = combo = gui.comboBox(
+            box, self, 'weatherTimeAttr',
+            orientation=Qt.Horizontal,
+            label='Time:',
+            sendSelectedValue=True,
+            callback=_setWeatherTimeAttr
+        )
+        combo.setModel(self._weatherTimeModel)
+        combo.activated.connect(_setWeatherTimeAttr)
+
+        self._comboWeatherTimestamp = combo = gui.comboBox(
+            box, self, '_weatherTimestamp',
+            orientation=Qt.Horizontal,
+            label='Data type:',
+            sendSelectedValue = True,
+            items = timestampOptions,
+            callback=_setWeatherTimestamp
+        )
+        combo.currentIndexChanged.connect(_setWeatherTimestamp)
+
+        self._weatherTimestringFormat = None
+
+        self._lineWeatherTimestringFormat = lineedit = QLineEdit(box)
+        lineedit.setMaxLength(64)
+        lineedit.textChanged.connect(_setWeatherTimeStringFormat)
+        lineedit.editingFinished.connect(_setWeatherTimeAttr)
+        lineedit.setPlaceholderText('Text time string format')
+        box.layout().addWidget(lineedit)
+        box.layout().setAlignment(lineedit, Qt.AlignRight)
+        lineedit.hide()
+        
+        box = gui.vBox(self.weatherWidget, 'Interpolation')
+
+        self._radioIntepType = radio = gui.radioButtons(
+            box, self, 'weatherInterpType',
+            btnLabels=["Inverse Distance Weighting"],
+            callback=_setInterpParams)
+
+        qv = QDoubleValidator(box)
+        qv.setBottom(0.0)
+        self.weatherTimeInterval = None
+        self._lineweatherTimeInterval = lineedit = gui.lineEdit(
+            box, self, 'weatherTimeInterval',
+            label='Average over (days)',
+            orientation=Qt.Horizontal,
+            validator=qv,
+            callback=_setweatherTimeInterval,
+            valueType=float)
+        lineedit.setEnabled(False)
+
+        self._lineWeatherGridSize = lineedit = gui.lineEdit(
+            box, self, 'weatherGridSize',
+            label='Grid size:',
+            orientation=Qt.Horizontal,
+            validator=QIntValidator(1, 4000, box),
+            valueType=int,
+            callback=_setInterpParams)
+        
+        self._lineInterpParam1 = lineedit = gui.lineEdit(
+            box, self, 'weatherSearchDistance',
+            label='Search distance (km):',
+            orientation=Qt.Horizontal,
+            valueType=int,
+            callback=_setInterpParams)
+
+        qv = QDoubleValidator(1e-7, 1e2, 7, box)
+        qv.setNotation(QDoubleValidator.StandardNotation)
+        self._lineInterpParam2 = lineedit = gui.lineEdit(
+            box, self, 'weatherInversePower',
+            label='Inverse weighting power, p:',
+            validator=qv,
+            orientation=Qt.Horizontal,
+            valueType=float,
+            callback=_setInterpParams
+        )
+
+        box = gui.vBox(self.weatherWidget, 'Visualisation')
+
+        self.weatherVisualMin = None
+        self._lineVisualMin = lineedit = gui.lineEdit(
+            box, self, 'weatherVisualMin',
+            label='Min:',
+            orientation=Qt.Horizontal,
+            valueType=float,
+            callback=self._updateWeatherOverlay)
+
+        self.weatherVisualMatchMin = True
+        self._checkVisualMatchMin = check = gui.checkBox(
+            box, self,
+            'weatherVisualMatchMin',
+            'Auto'
+        )
+        
+        self.weatherVisualMax = None
+        self._lineVisualMax = lineedit = gui.lineEdit(
+            box, self, 'weatherVisualMax',
+            label='Max:',
+            orientation=Qt.Horizontal,
+            valueType=float,
+            callback=self._updateWeatherOverlay)
+
+        self.weatherVisualMatchMax = True
+        self._checkVisualMatchMax = check = gui.checkBox(
+            box, self,
+            'weatherVisualMatchMax',
+            'Auto'
+        )
+
+        self.weatherVisualOpacity = 127
+        self._sliderVisualOpacity = gui.hSlider(
+            box, self, 'weatherVisualOpacity', None, 0, 255, 5,
+            label='Opacity:', labelFormat=' %d/255',
+            callback=self._updateWeatherOverlay)
+
+        self.weatherGenerateAll = False
+        self._checkGenerateAll = check = gui.checkBox(
+            self.weatherWidget, self,
+            'weatherGenerateAll',
+            'Generate all overlays',
+            callback=_toggleGenerateAll
+        )
+
+        self._buttonGenerateGrids = button = gui.button(
+            self.weatherWidget, self,
+            label='Generate overlay with current bounds',
+            callback=self.generateGrids
+        )
+        button.hide()
+
+        gui.rubber(self.weatherWidget)
 
         QTimer.singleShot(0, _set_map_provider)
         QTimer.singleShot(0, _toggle_legend)
@@ -1102,6 +1472,9 @@ class OWMap(OWWidget):
 
         def _showTimeSlice():
             self._dockTimeSlice.show()
+
+        def _showDockWeather():
+            self._dockWeather.show()
 
         # QDockWidget can only be used with QMainWindow
         # We have 2 options: create a QMainWindow in the QDialog (OWWidget
@@ -1134,22 +1507,141 @@ class OWMap(OWWidget):
         dock.setWidget(self.timeSlice)
         self.mainWindow.addDockWidget(Qt.BottomDockWidgetArea, dock)
 
+        # add the weather dock
+        self._dockWeather = dock = QDockWidget('Interpolated overlay', self.mainWindow)
+        dock.setAllowedAreas(Qt.LeftDockWidgetArea | Qt.RightDockWidgetArea)
+        dock.setWidget(self.weatherWidget)
+        self.mainWindow.addDockWidget(Qt.RightDockWidgetArea, dock)
+        dock.hide()
+
         menubar = self.mainWindow.menuBar()
 
         menuShowDocks = menubar.addMenu('Show')
         menuShowDocks.addAction('Control area').triggered.connect(_showControlArea)
         menuShowDocks.addAction('Slice').triggered.connect(_showTimeSlice)
+        menuShowDocks.addAction('Interpolated overlay').triggered.connect(_showDockWeather)
 
         menubar.addMenu(menuShowDocks)
 
+        self.weatherGrids = None
+    
+    def _updateWeatherOverlay(self):
+        self._redrawWeatherPending = True
+
+    def _doUpdateWeatherOverlay(self):
+        if self.weatherGrids is not None:
+            self.map.evalJS('clearWeatherOverlayImage(); weatherLayer.setBounds(map.getBounds());0')
+            size = self.weatherGridSize
+            image = QImage(size, size, QImage.Format_ARGB32)
+            image.fill(QColor.fromHsl(0, 127, 180, self.weatherVisualOpacity))
+            if self.weatherGenerateAll:
+                grid = self.weatherGrids[self.weatherTimebar.valueSteps()[0]]
+            else:
+                grid = self.weatherGrids[0]
+            if self.weatherVisualMatchMax:
+                maxv = np.nanmax(grid)
+                self._lineVisualMax.setText(str(maxv))
+            else:
+                maxv = self.weatherVisualMax
+            if self.weatherVisualMatchMin:
+                minv = np.nanmin(grid)
+                self._lineVisualMin.setText(str(minv))
+            else:
+                minv = self.weatherVisualMin
+
+            rngv = maxv - minv
+            if rngv > 1e-10:
+                for i, a in enumerate(grid):
+                    image.setPixelColor(i % size, i // size, QColor.fromHsl((a-minv) * 240 // rngv, 127, 180, self.weatherVisualOpacity))
+            image.save(self._weatherOverlayImagePath, 'PNG')
+            self.map.evalJS('weatherLayer.setUrl("{}#{}"); 0;'
+                    .format(self.map.toFileURL(self._weatherOverlayImagePath),
+                            np.random.random()))
+
+    def clearGrids(self):
+        self.weatherGrids = None
+        self.map.evalJS('clearWeatherOverlayImage();')
+
+    
+    def generateGrids(self):
+        # check that attributes are set
+        if self.weatherData is None:
+            return
+        for attr in (self.weatherLatAttr,
+                        self.weatherLonAttr,
+                        self.weatherParamAttr,
+                        self.weatherTimeAttr):
+            if attr is None or attr not in self.weatherData.domain:
+                return
+        
+        # set default parameters?
+        # not for now
+
+        # get grid coordinates
+        self.map.evalJS('generateCoordGrid(%i)' % self.weatherGridSize)
+
+    def _calculateGrids(self, points):
+        # get arrays
+        gridlat, gridlon = np.array(points).T
+        lat = self.weatherData.get_column_view(self.weatherLatAttr)[0]
+        lon = self.weatherData.get_column_view(self.weatherLonAttr)[0]
+        param = self.weatherData.get_column_view(self.weatherParamAttr)[0]
+        time = np.array(self.weatherTimeData)
 
 
+        gridsize = int(self.weatherGridSize)
 
+        # get indices of points in range and distances:
+        distances = []
+        inDistanceRange = []
+        for i in range(gridsize * gridsize):
+            lat1, lon1, lat2, lon2 = map(np.radians, [gridlat[i], gridlon[i], lat, lon])
+            dlon = lon2 - lon1
+            dlat = lat2 - lat1
+            a = np.sin(dlat/2.0)**2 + np.cos(lat1) * np.cos(lat2) * np.sin(dlon/2.0)**2
+            c = 2 * np.arcsin(np.sqrt(a))
+            km = 6367 * c
+            distances.append(km)
+            inDistanceRange.append((km < self.weatherSearchDistance).nonzero()[0])
+        distances = np.asarray(distances)
+        inDistanceRange = np.asarray(inDistanceRange)
 
-    autocommit = settings.Setting(True)
+        slider = self.weatherTimebar
+        v = slider.valueSteps()
+        sliderRange = v[1] - v[0]
+        
+        if self.weatherGenerateAll:
+            # number of grids to generate based on timebar range
+            nGrids = int(slider.steps() - sliderRange + 1)
+            # show modal dialog
+        else:
+            nGrids = 1
+        
+        grids = []
+        self.progressBarInit(None)
+        for g in range(nGrids):
+            if self.weatherGenerateAll:
+                startTime = slider.stepsToValue(g)
+                endTime = slider.stepsToValue(g + sliderRange)
+            else:
+                startTime, endTime = slider.value()
+            inTimeRange = ((time >= startTime) & (time <= endTime)).nonzero()[0]
+            grid = np.zeros(gridsize * gridsize)
+            for i in range(gridsize * gridsize):
+                inBoth = np.intersect1d(inDistanceRange[i], inTimeRange, assume_unique=True).astype('i8')
+                if inBoth.size:
+                    grid[i] = np.sum(distances[i][inBoth]**-self.weatherInversePower * param[inBoth], axis=0)/\
+                            np.sum(distances[i][inBoth]**-self.weatherInversePower)
+            grids.append(grid)
+            self.progressBarAdvance(100 / nGrids, None)
+        self.weatherGrids = np.asarray(grids)
+        self.progressBarFinished(None)
+        self._updateWeatherOverlay()
+
 
     def __del__(self):
         self.progressBarFinished(None)
+        os.remove(self._weatherOverlayImagePath)
         self.map = None
 
     def commit(self):
@@ -1178,7 +1670,7 @@ class OWMap(OWWidget):
         lat, lon = find_lat_lon(data)
         if lat or lon:
             self._combo_lat.setCurrentIndex(-1 if lat is None else self._latlon_model.indexOf(lat))
-            self._combo_lon.setCurrentIndex(-1 if lat is None else self._latlon_model.indexOf(lon))
+            self._combo_lon.setCurrentIndex(-1 if lon is None else self._latlon_model.indexOf(lon))
             self.lat_attr = lat.name
             self.lon_attr = lon.name
 
@@ -1199,7 +1691,8 @@ class OWMap(OWWidget):
 
         self.openContext(data)
 
-
+        self.map.setTimeData(None)
+        self.map.setTimeBounds(None, None)
 
         self.map.set_data(self.data, self.lat_attr, self.lon_attr, update=False)
         # initialise time data bounds
@@ -1224,6 +1717,53 @@ class OWMap(OWWidget):
         self.controls.class_attr.setEnabled(learner is not None)
         self.controls.class_attr.setToolTip(
             'Needs a Learner input for modelling.' if learner is None else '')
+
+    @Inputs.weatherData
+    def loadWeatherData(self, data):
+        self.weatherData = data
+
+        if data is None or not len(data):
+            self.weatherData = None
+            self.weatherLatAttr = None
+            self.weatherLonAttr = None
+            self.weatherTimeAttr = None
+            self.weatherParamAttr = None
+            self.weatherInterpType = 0
+            for model in (self._weatherModel,
+                          self._weatherTimeModel):
+                model.set_domain(None)
+            self.clearGrids
+            self._comboWeatherTime.activated.emit(self._comboWeatherTime.currentIndex())
+            return
+
+        domain = data is not None and data.domain
+        for model in (self._weatherModel,
+                      self._weatherTimeModel):
+            model.set_domain(domain)
+            
+        lat, lon = find_lat_lon(data)
+        if lat or lon:
+            self._comboWeatherLat.setCurrentIndex(-1 if lat is None else self._weatherModel.indexOf(lat))
+            self._comboWeatherLon.setCurrentIndex(-1 if lon is None else self._weatherModel.indexOf(lon))
+            self.weatherLatAttr = lat.name
+            self.weatherLonAttr = lon.name
+        else:
+            self.weatherLatAttr = self.weatherLonAttr = self.weatherParamAttr = None
+
+        if self.timeAttr is not None:
+            self._comboWeatherTimestamp.setCurrentIndex(self._combo_timestamp.currentIndex())
+        else:
+            self._comboWeatherTimestamp.setCurrentIndex(0)
+        if len(self._weatherTimeModel):
+            self._comboWeatherTime.setCurrentIndex(0)
+        else:
+            self.weatherTimeAttr = None
+        
+        self.weatherParamAttr = None
+        # initialise data
+        self._comboWeatherTime.activated.emit(self._comboWeatherTime.currentIndex())
+
+        self._dockWeather.show()
 
     def train_model(self):
         model = None
@@ -1261,6 +1801,7 @@ class OWMap(OWWidget):
                       self._label_model,
                       self._timeModel):
             model.set_domain(None)
+        self._combo_time.activated.emit(self._combo_time.currentIndex())
         self.lat_attr = self.lon_attr = self.class_attr = self.color_attr = \
         self.label_attr = self.shape_attr = self.size_attr = None
 

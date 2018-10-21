@@ -84,6 +84,7 @@ var zoomButton = L.easyButton({
 
 var heatmapLayer = L.imageOverlay(_TRANSPARENT_IMAGE, [[0, 0], [0, 0]]).addTo(map);
 var markersImageLayer = L.imageOverlay(_TRANSPARENT_IMAGE, [[0, 0], [0, 0]]).addTo(map);
+var weatherLayer = L.imageOverlay(_TRANSPARENT_IMAGE, [[0, 0], [0, 0]]).addTo(map);
 
 var BoxSelect = L.Map.BoxZoom.extend({
     _onMouseUp: function (e) {
@@ -482,6 +483,27 @@ function reset_heatmap() {
     pybridge.recompute_heatmap(points);
 }
 
+function generateCoordGrid(gridSize) {
+    var points = [],
+        div = map.getContainer(),
+        b = map.getPixelBounds(),
+        top_offset = b.min.y < 0 ? -b.min.y : 0,
+        b = map.getPixelWorldBounds(),
+        height = Math.min(div.clientHeight - top_offset, b.max.y),
+        width = div.clientWidth,
+        dlat = height / gridSize,
+        dlon = width / gridSize;
+    // Project pixel coordinates into latlng pairs
+    for (var i=0; i < gridSize; ++i) {
+        var y = top_offset + i*dlat + dlat/2; // +dlat/2 ==> centers of squares
+        for (var j=0; j < gridSize; ++j) {
+            var latlon = map.containerPointToLatLng([j*dlon + dlon/2, y]);
+            points.push([latlon.lat, latlon.lng]);
+        }
+    }
+    pybridge.calculateGrids(points);
+}
+
 var _heatmap_canvas_ctx = document.getElementById('heatmap_canvas').getContext('2d'),
     _HEATMAP_GRID_SIZE = _heatmap_canvas_ctx.canvas.width;
     _N_SHAPES = _N_SHAPES - (Math.random() > .05);
@@ -540,6 +562,11 @@ function clear_markers_overlay_image() {
     $(markersImageLayer.getPane()).show(0);
 }
 
+function clearWeatherOverlayImage() {
+    weatherLayer.setUrl(_TRANSPARENT_IMAGE);
+    $(weatherLayer.getPane()).show(0);
+}
+
 map.on('zoomstart', function() { $(markersImageLayer.getPane()).hide(0); });
 
 
@@ -558,6 +585,7 @@ function redraw_markers_overlay_image() {
 $(document).ready(function() {
     setTimeout(function() { map.on('moveend', reset_heatmap); }, 100);
     setTimeout(function() { map.on('moveend', redraw_markers_overlay_image); }, 100);
+    setTimeout(function() { map.on('moveend', pybridge.redrawWeather); }, 100)
 });
 
 
